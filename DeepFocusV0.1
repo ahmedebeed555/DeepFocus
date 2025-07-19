@@ -1,0 +1,320 @@
+/*
+  Deep Flow Server
+  ----------------
+
+  This project turns a NodeMCU ESP8266 into a physical focus management device
+  controlled by a web browser on a PC. It hosts a web server that allows you to
+  switch between different work modes, indicated by LEDs.
+
+  The "Creative Mode" fetches a unique prompt from the Google Gemini AI to
+  spark creativity.
+
+  Hardware:
+  - NodeMCU ESP8266
+  - 1x Blue LED
+  - 1x Green LED
+  - 1x Yellow LED
+  - 3x 220-ohm resistors (or similar)
+  - Breadboard and Jumper Wires
+
+  Wiring:
+  - D1 (GPIO5) -> Resistor -> Blue LED -> GND
+  - D2 (GPIO4) -> Resistor -> Green LED -> GND
+  - D3 (GPIO0) -> Resistor -> Yellow LED -> GND
+
+  Instructions:
+  1. **Update ESP8266 Board Manager:** In Arduino IDE, go to Tools > Board > Boards Manager. Search for "esp8266" and update to the latest version.
+  2. Install the required libraries:
+     - Go to Sketch > Include Library > Manage Libraries...
+     - Search for and install "ArduinoJson" by Benoit Blanchon.
+  3. Update the `ssid`, `password`, and `API_KEY` variables below.
+  4. Upload the code to your NodeMCU ESP8266.
+  5. Open the Serial Monitor (Tools > Serial Monitor) and set the baud rate to 115200.
+  6. The Serial Monitor will display the IP address of your device.
+  7. Open a web browser on your PC (on the same WiFi) and enter that IP address.
+*/
+
+// Required Libraries
+#include <ESP8266WiFi.h>
+#include <WiFiClient.h>
+#include <ESP8266WebServer.h>
+#include <ESP8266HTTPClient.h>
+#include <ArduinoJson.h>
+#include <WiFiClientSecure.h>
+
+
+
+
+// --- IMPORTANT: UPDATE THESE VALUES ---
+const char* ssid = "Tp-link";       // Your WiFi network name
+const char* password = "123456123"; // Your WiFi password
+String API_KEY = "AIzaSyAZICsO9NcaAmRiAmnxv95yMPPpgqOXoZw"; // Your Google AI Gemini API Key       AIzaSyAZICsO9NcaAmRiAmnxv95yMPPpgqOXoZw
+// ---
+
+
+
+
+
+
+
+// Define LED pins
+const int blueLedPin = 5;  // D1
+const int greenLedPin = 4; // D2
+const int yellowLedPin = 0; // D3
+
+// Web Server on port 80
+ESP8266WebServer server(80);
+
+// Global variable to hold the latest AI prompt
+String aiPrompt = "Click 'Enter Creative Mode' to get a prompt...";
+
+// --- Function Prototypes ---
+void handleRoot();
+void handleFocus();
+void handleCreative();
+void handleBreak();
+void handleReset();
+void getCreativePrompt();
+void setLedState(int led);
+
+// =================================================================
+// SETUP: Runs once when the device boots
+// =================================================================
+void setup() {
+  // Start Serial communication for debugging
+  Serial.begin(115200);
+  delay(10);
+
+  // Set LED pins to OUTPUT mode
+  pinMode(blueLedPin, OUTPUT);
+  pinMode(greenLedPin, OUTPUT);
+  pinMode(yellowLedPin, OUTPUT);
+
+  // Turn all LEDs off initially
+  setLedState(0);
+
+  // --- Connect to WiFi ---
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.println("WiFi connected!");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  // --- Define Web Server Routes ---
+  server.on("/", HTTP_GET, handleRoot);         // Main page
+  server.on("/focus", HTTP_POST, handleFocus);       // Set focus mode
+  server.on("/creative", HTTP_POST, handleCreative); // Set creative mode
+  server.on("/break", HTTP_POST, handleBreak);       // Set break mode
+  server.on("/reset", HTTP_POST, handleReset);       // Reset to standby
+
+  // Start the server
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+// =================================================================
+// LOOP: Runs continuously
+// =================================================================
+void loop() {
+  // Handle incoming client requests
+  server.handleClient();
+}
+
+// =================================================================
+// WEB PAGE HANDLERS
+// =================================================================
+
+/**
+ * @brief Handles the root URL ("/") and serves the main HTML page.
+ */
+void handleRoot() {
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Deep Flow Server</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #121212; color: #e0e0e0; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+    .container { text-align: center; background-color: #1e1e1e; padding: 40px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.3); max-width: 500px; }
+    h1 { color: #ffffff; }
+    p { font-size: 1.1em; color: #bbbbbb; }
+    .buttons { margin: 30px 0; }
+    button {
+      background-color: #333; color: white; border: none; padding: 15px 30px;
+      margin: 10px; border-radius: 8px; font-size: 16px; cursor: pointer;
+      transition: background-color 0.3s, transform 0.2s;
+    }
+    button:hover { background-color: #007bff; transform: translateY(-2px); }
+    #focusBtn:hover { background-color: #007bff; }
+    #creativeBtn:hover { background-color: #28a745; }
+    #breakBtn:hover { background-color: #ffc107; }
+    #resetBtn:hover { background-color: #dc3545; }
+    .prompt-box {
+      background-color: #2a2a2a; border: 1px solid #444; border-radius: 8px;
+      padding: 20px; margin-top: 20px; min-height: 50px;
+      display: flex; justify-content: center; align-items: center;
+    }
+    .prompt-text { font-size: 1.2em; font-style: italic; color: #a2d2ff; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Deep Flow Server</h1>
+    <p>Select your work mode to control the device.</p>
+    <div class="buttons">
+      <form action="/focus" method="POST"><button id="focusBtn" type="submit">Deep Focus</button></form>
+      <form action="/creative" method="POST"><button id="creativeBtn" type="submit">Enter Creative Mode</button></form>
+      <form action="/break" method="POST"><button id="breakBtn" type="submit">Take a Break</button></form>
+      <form action="/reset" method="POST"><button id="resetBtn" type="submit">Reset</button></form>
+    </div>
+    <div class="prompt-box">
+      <p class="prompt-text">)rawliteral";
+  
+  html += aiPrompt; // Add the current AI prompt
+  
+  html += R"rawliteral(</p>
+    </div>
+  </div>
+</body>
+</html>
+  )rawliteral";
+
+  server.send(200, "text/html", html);
+}
+
+/**
+ * @brief Handles the /focus request. Turns on the blue LED.
+ */
+void handleFocus() {
+  Serial.println("Mode changed to: Deep Focus");
+  setLedState(1); // Blue LED
+  aiPrompt = "In deep focus mode. Stay on task.";
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+/**
+ * @brief Handles the /creative request. Turns on the green LED and gets an AI prompt.
+ */
+void handleCreative() {
+  Serial.println("Mode changed to: Creative Mode");
+  setLedState(2); // Green LED
+  getCreativePrompt(); // Call the Gemini API
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+/**
+ * @brief Handles the /break request. Turns on the yellow LED.
+ */
+void handleBreak() {
+  Serial.println("Mode changed to: Break");
+  setLedState(3); // Yellow LED
+  aiPrompt = "Time for a short break. Relax your mind.";
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+/**
+ * @brief Handles the /reset request. Turns all LEDs off.
+ */
+void handleReset() {
+  Serial.println("Mode changed to: Standby");
+  setLedState(0); // All off
+  aiPrompt = "Click a mode to begin.";
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+
+// =================================================================
+// HELPER FUNCTIONS
+// =================================================================
+
+/**
+ * @brief Sets the state of the LEDs.
+ * @param led 0: all off, 1: blue, 2: green, 3: yellow
+ */
+void setLedState(int led) {
+  digitalWrite(blueLedPin, led == 1 ? HIGH : LOW);
+  digitalWrite(greenLedPin, led == 2 ? HIGH : LOW);
+  digitalWrite(yellowLedPin, led == 3 ? HIGH : LOW);
+}
+
+/**
+ * @brief Makes an API call to Google Gemini to get a creative prompt.
+ */
+void getCreativePrompt() {
+  // Use WiFiClientSecure for HTTPS with modern ESP8266 cores
+  std::unique_ptr<BearSSL::WiFiClientSecure>client(new BearSSL::WiFiClientSecure);
+  
+  // This allows the connection without verifying the server's root certificate.
+  // It's less secure than full validation but necessary for simple setups.
+  client->setInsecure();
+
+  HTTPClient https;
+
+  String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + API_KEY;
+
+  Serial.print("Requesting URL: ");
+  Serial.println(url);
+  
+  // The modern `begin` method takes the client object and the URL.
+  if (https.begin(*client, url)) {
+    https.addHeader("Content-Type", "application/json");
+
+    // Construct the JSON payload
+    String payload = "{\"contents\":[{\"parts\":[{\"text\":\"Give me a two-word creative prompt for a visual artist.\"}]}]}";
+    
+    // Send the POST request
+    int httpCode = https.POST(payload);
+
+    if (httpCode > 0) {
+      Serial.printf("[HTTPS] POST... code: %d\n", httpCode);
+
+      if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
+        String responsePayload = https.getString();
+        Serial.println(responsePayload);
+
+        // Parse the JSON response
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, responsePayload);
+
+        if (error) {
+          Serial.print("deserializeJson() failed: ");
+          Serial.println(error.c_str());
+          aiPrompt = "Error parsing AI response.";
+          return;
+        }
+
+        // Extract the text content
+        const char* text = doc["candidates"][0]["content"]["parts"][0]["text"];
+        if (text) {
+          aiPrompt = String(text);
+          // Clean up the response a bit
+          aiPrompt.replace("\n", " ");
+          aiPrompt.trim();
+        } else {
+          aiPrompt = "Could not extract prompt from AI response.";
+        }
+      }
+    } else {
+      Serial.printf("[HTTPS] POST... failed, error: %s\n", https.errorToString(httpCode).c_str());
+      aiPrompt = "Failed to connect to AI service.";
+    }
+
+    https.end();
+  } else {
+    Serial.printf("[HTTPS] Unable to connect\n");
+    aiPrompt = "Connection to AI service failed.";
+  }
+}
